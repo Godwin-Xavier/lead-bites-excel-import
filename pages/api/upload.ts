@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getSession } from '@/lib/auth';
 import { processBatch, testConnection } from '@/lib/mautic';
 import type { LeadBitesRow } from '@/lib/csv';
+import { pauseMarketingEmails, resumeMarketingEmails } from '@/lib/vps_control';
 
 export const config = {
   api: {
@@ -23,7 +24,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(401).json({ error: 'Not logged in' });
   }
 
-  const { rows, testOnly } = (req.body || {}) as { rows?: LeadBitesRow[]; testOnly?: boolean };
+  const { rows, testOnly, action } = (req.body || {}) as {
+    rows?: LeadBitesRow[];
+    testOnly?: boolean;
+    action?: 'pause' | 'resume';
+  };
+
+  // VPS-side control: client calls this before/after the batch loop
+  // to free Mautic CPU during the import. Failures are non-fatal.
+  if (action === 'pause') {
+    const r = await pauseMarketingEmails();
+    return res.status(200).json({ ok: true, control: r });
+  }
+  if (action === 'resume') {
+    const r = await resumeMarketingEmails();
+    return res.status(200).json({ ok: true, control: r });
+  }
 
   // Optional test-connection ping (used by client before starting batches)
   if (testOnly) {

@@ -315,6 +315,18 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
         throw new Error(data.error || 'Mautic connection test failed');
       }
 
+      // Pause marketing-emails on the VPS (frees Mautic CPU during import).
+      // Best-effort: failures don't abort the upload.
+      try {
+        await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'pause' }),
+        });
+      } catch {
+        /* non-fatal */
+      }
+
       let running: RunState = {
         ...initialRun,
         status: 'running',
@@ -391,6 +403,19 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
           };
         }
         setRun({ ...running });
+      }
+
+      // Resume marketing-emails on the VPS (whether finished, cancelled, or errored).
+      // Best-effort: failures don't matter, marketing-emails will eventually be
+      // resumed manually if this fails.
+      try {
+        await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'resume' }),
+        });
+      } catch {
+        /* non-fatal */
       }
 
       const final: RunState = {
