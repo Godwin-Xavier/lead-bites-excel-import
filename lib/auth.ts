@@ -1,4 +1,3 @@
-import type { IronSessionOptions } from 'iron-session';
 import { getIronSession, type SessionOptions } from 'iron-session';
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { NextApiRequest, NextApiResponse } from 'next';
