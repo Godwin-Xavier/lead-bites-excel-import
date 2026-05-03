@@ -69,6 +69,10 @@ async function findContactByEmail(
 }
 
 function rowToContactBody(row: LeadBitesRow, includeTags: boolean): Record<string, any> {
+  // Note: do NOT send `state` — Mautic validates it against a whitelist per country
+  // (US states, Indian states, etc.). International values like "Catalonia" or Korean
+  // provinces get rejected with HTTP 400 "state: This value is not valid."
+  // City + country is enough for personalization in our cold-email sequence.
   const body: Record<string, any> = {
     firstname: row.firstName,
     lastname: row.lastName,
@@ -77,7 +81,6 @@ function rowToContactBody(row: LeadBitesRow, includeTags: boolean): Record<strin
     company: row.organization,
     website: row.website,
     city: row.city,
-    state: row.state,
     country: row.country,
   };
   if (includeTags) {
