@@ -1,16 +1,15 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getSession } from '@/lib/auth';
-import { parseLeadBitesCsv, validateColumns } from '@/lib/csv';
-import { importRows, testConnection } from '@/lib/mautic';
+import { processBatch, testConnection } from '@/lib/mautic';
+import type { LeadBitesRow } from '@/lib/csv';
 
 export const config = {
   api: {
     bodyParser: {
-      sizeLimit: '8mb',
+      sizeLimit: '2mb', // Each batch is small; cap to be safe
     },
   },
-  // 60s for Pro, 10s for Hobby. We design under 10s for safety.
-  maxDuration: 60,
+  maxDuration: 30, // Pro = 60, Hobby = 10. We're designed for 10s with margin.
 };
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -19,63 +18,38 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Auth check
   const session = await getSession(req, res);
   if (!session.loggedIn) {
     return res.status(401).json({ error: 'Not logged in' });
   }
 
-  // Body shape: { csv: string } — sent as JSON from the browser after FileReader
-  const { csv } = (req.body || {}) as { csv?: string };
-  if (!csv || typeof csv !== 'string') {
-    return res.status(400).json({ error: 'Missing csv string in body' });
+  const { rows, testOnly } = (req.body || {}) as { rows?: LeadBitesRow[]; testOnly?: boolean };
+
+  // Optional test-connection ping (used by client before starting batches)
+  if (testOnly) {
+    const t = await testConnection();
+    if (!t.ok) return res.status(502).json({ error: `Mautic unreachable: ${t.message}` });
+    return res.status(200).json({ ok: true });
   }
 
-  // Validate columns
-  const colCheck = validateColumns(csv);
-  if (!colCheck.ok) {
+  if (!Array.isArray(rows)) {
+    return res.status(400).json({ error: 'Body must include `rows` array' });
+  }
+
+  if (rows.length === 0) {
+    return res.status(200).json({ ok: true, created: 0, updated: 0, failed: 0, failures: [] });
+  }
+
+  if (rows.length > 30) {
     return res.status(400).json({
-      error: `CSV is missing required columns: ${colCheck.missing.join(', ')}`,
+      error: `Batch too large (${rows.length}). Max 30 rows per batch.`,
     });
   }
 
-  // Parse + clean
-  const parsed = parseLeadBitesCsv(csv);
-  if (parsed.rows.length === 0) {
-    return res.status(400).json({
-      error: 'No valid rows after cleaning',
-      summary: {
-        totalRows: parsed.totalRows,
-        skippedRows: parsed.skippedRows,
-        skipReasons: parsed.skipReasons,
-      },
-    });
-  }
-
-  // Quick Mautic connectivity test before doing real work
-  const connTest = await testConnection();
-  if (!connTest.ok) {
-    return res.status(502).json({
-      error: `Cannot reach Mautic: ${connTest.message}`,
-    });
-  }
-
-  // Import
   try {
-    const summary = await importRows(parsed.rows);
-    return res.status(200).json({
-      ok: true,
-      parse: {
-        totalRows: parsed.totalRows,
-        cleanRows: parsed.rows.length,
-        skippedRows: parsed.skippedRows,
-        skipReasons: parsed.skipReasons,
-      },
-      mautic: summary,
-    });
+    const result = await processBatch(rows);
+    return res.status(200).json({ ok: true, ...result });
   } catch (e: any) {
-    return res.status(500).json({
-      error: e?.message || 'Import failed',
-    });
+    return res.status(500).json({ error: e?.message || 'Batch failed' });
   }
 }

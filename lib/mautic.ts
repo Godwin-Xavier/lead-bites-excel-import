@@ -6,7 +6,6 @@ const PASSWORD = process.env.MAUTIC_PASSWORD || '';
 const LEAD_TAG = process.env.LEAD_TAG || 'lead bites';
 
 if (!BASE_URL || !USERNAME || !PASSWORD) {
-  // Don't throw at module load — let the API route handle missing env
   console.warn('Mautic env vars are not fully configured');
 }
 
@@ -14,18 +13,11 @@ function authHeader(): string {
   return 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
 }
 
-export type MauticContact = {
-  id: number;
-  email: string;
-  tags?: Record<string, { tag: string }> | Array<{ tag: string }>;
-};
-
-export type ImportSummary = {
+export type BatchResult = {
   created: number;
   updated: number;
   failed: number;
   failures: Array<{ email: string; error: string }>;
-  durationMs: number;
 };
 
 /**
@@ -45,55 +37,39 @@ export async function testConnection(): Promise<{ ok: boolean; status: number; m
 }
 
 /**
- * Fetch all existing contacts and build a lowercase-email → id map.
- * Used for fast in-memory dedupe before deciding create vs update.
+ * Find an existing contact by email. Returns id+tags or null.
  */
-export async function fetchExistingEmailMap(): Promise<Map<string, number>> {
-  const map = new Map<string, number>();
-  const PAGE_SIZE = 1000;
-  let start = 0;
-  // Mautic's /api/contacts returns up to ~500-1000 at a time; we loop.
-  // We only need email + id, so use minimal field selection.
-  while (true) {
-    const url = new URL(`${BASE_URL}/api/contacts`);
-    url.searchParams.set('limit', String(PAGE_SIZE));
-    url.searchParams.set('start', String(start));
-    url.searchParams.set('orderBy', 'id');
-    url.searchParams.set('orderByDir', 'asc');
-    // Only fetch the email field to keep payload small
-    url.searchParams.set('minimal', '1');
+async function findContactByEmail(
+  email: string,
+): Promise<{ id: number; tags: string[] } | null> {
+  const url = new URL(`${BASE_URL}/api/contacts`);
+  url.searchParams.set('search', `email:${email}`);
+  url.searchParams.set('limit', '1');
 
-    const res = await fetch(url.toString(), {
-      headers: { Authorization: authHeader(), Accept: 'application/json' },
-    });
-    if (!res.ok) {
-      throw new Error(`Mautic listing failed: ${res.status} ${await res.text()}`);
-    }
-    const data: any = await res.json();
-    const contacts: Record<string, MauticContact> = data.contacts || {};
-    const ids = Object.keys(contacts);
-    if (ids.length === 0) break;
-
-    for (const id of ids) {
-      const c = contacts[id];
-      if (c?.email) map.set(c.email.toLowerCase(), Number(c.id));
-    }
-
-    if (ids.length < PAGE_SIZE) break;
-    start += PAGE_SIZE;
-
-    // Safety: don't loop forever
-    if (start > 500000) break;
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: authHeader(), Accept: 'application/json' },
+  });
+  if (!res.ok) {
+    throw new Error(`Search failed: ${res.status}`);
   }
-  return map;
+  const data: any = await res.json();
+  const contacts: Record<string, any> = data.contacts || {};
+  const ids = Object.keys(contacts);
+  if (ids.length === 0) return null;
+  const c = contacts[ids[0]];
+  let tags: string[] = [];
+  if (Array.isArray(c.tags)) {
+    tags = c.tags.map((t: any) => (typeof t === 'string' ? t : t?.tag)).filter(Boolean);
+  } else if (c.tags && typeof c.tags === 'object') {
+    tags = Object.values(c.tags as Record<string, { tag: string }>)
+      .map((t: any) => t?.tag)
+      .filter(Boolean);
+  }
+  return { id: Number(c.id), tags };
 }
 
-/**
- * Convert our cleaned row to a Mautic contact body.
- * Tags are sent as an array of strings; Mautic creates them on-the-fly.
- */
-export function rowToMauticBody(row: LeadBitesRow): Record<string, any> {
-  return {
+function rowToContactBody(row: LeadBitesRow, includeTags: boolean): Record<string, any> {
+  const body: Record<string, any> = {
     firstname: row.firstName,
     lastname: row.lastName,
     email: row.email,
@@ -103,89 +79,60 @@ export function rowToMauticBody(row: LeadBitesRow): Record<string, any> {
     city: row.city,
     state: row.state,
     country: row.country,
-    address1: '', // Optional — left empty
-    tags: [LEAD_TAG],
-    // Custom fields (only used if you've configured them in Mautic)
-    industry: row.industries,
-    description: row.description,
   };
+  if (includeTags) {
+    body.tags = [LEAD_TAG];
+  }
+  return body;
 }
 
 /**
- * Create a single contact. Returns the contact id on success.
+ * Process a single row: dedupe by email, create or tag.
+ * Returns 'created' | 'updated' on success, throws on failure.
  */
-export async function createContact(row: LeadBitesRow): Promise<number> {
-  const body = rowToMauticBody(row);
-  // Don't push tags array via the create-new payload — Mautic 5 batch create handles
-  // tags inconsistently. We do tags separately via PATCH.
-  const { tags, ...contactData } = body;
+async function processRow(row: LeadBitesRow): Promise<'created' | 'updated'> {
+  const existing = await findContactByEmail(row.email);
 
-  const res = await fetch(`${BASE_URL}/api/contacts/new`, {
-    method: 'POST',
-    headers: {
-      Authorization: authHeader(),
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(contactData),
-  });
-  if (!res.ok) {
-    throw new Error(`Create failed: ${res.status} ${await res.text()}`);
-  }
-  const data: any = await res.json();
-  const id = Number(data?.contact?.id);
-  if (!id) throw new Error('Mautic returned no contact id');
-  // Tag the new contact
-  await applyLeadBitesTag(id);
-  return id;
-}
-
-/**
- * Apply the lead-bites tag to an existing contact, preserving any tags it already has.
- * Uses the fetch-merge-PATCH workaround that the local bot proved reliable.
- */
-export async function applyLeadBitesTag(contactId: number): Promise<void> {
-  // Fetch current tags
-  const fetchRes = await fetch(`${BASE_URL}/api/contacts/${contactId}`, {
-    headers: { Authorization: authHeader(), Accept: 'application/json' },
-  });
-  if (!fetchRes.ok) {
-    throw new Error(`Fetch contact ${contactId} failed: ${fetchRes.status}`);
-  }
-  const data: any = await fetchRes.json();
-  const c = data.contact || {};
-
-  let existingTags: string[] = [];
-  if (Array.isArray(c.tags)) {
-    existingTags = c.tags.map((t: any) => (typeof t === 'string' ? t : t?.tag)).filter(Boolean);
-  } else if (c.tags && typeof c.tags === 'object') {
-    existingTags = Object.values(c.tags as Record<string, { tag: string }>)
-      .map((t: any) => t?.tag)
-      .filter(Boolean);
-  }
-
-  if (existingTags.includes(LEAD_TAG)) {
-    // Already tagged — nothing to do
-    return;
-  }
-
-  const newTags = [...existingTags, LEAD_TAG];
-  const patchRes = await fetch(`${BASE_URL}/api/contacts/${contactId}/edit`, {
-    method: 'PATCH',
-    headers: {
-      Authorization: authHeader(),
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify({ tags: newTags }),
-  });
-  if (!patchRes.ok) {
-    throw new Error(`Tag PATCH ${contactId} failed: ${patchRes.status} ${await patchRes.text()}`);
+  if (existing) {
+    // Existing contact — preserve tags, add LEAD_TAG if missing
+    if (existing.tags.includes(LEAD_TAG)) {
+      // Already tagged; nothing to do, but report as updated for visibility
+      return 'updated';
+    }
+    const newTags = [...existing.tags, LEAD_TAG];
+    const patchRes = await fetch(`${BASE_URL}/api/contacts/${existing.id}/edit`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: authHeader(),
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ tags: newTags }),
+    });
+    if (!patchRes.ok) {
+      throw new Error(`Tag PATCH failed: ${patchRes.status} ${(await patchRes.text()).slice(0, 200)}`);
+    }
+    return 'updated';
+  } else {
+    // New contact — create with tag inline
+    const createRes = await fetch(`${BASE_URL}/api/contacts/new`, {
+      method: 'POST',
+      headers: {
+        Authorization: authHeader(),
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(rowToContactBody(row, true)),
+    });
+    if (!createRes.ok) {
+      throw new Error(`Create failed: ${createRes.status} ${(await createRes.text()).slice(0, 200)}`);
+    }
+    return 'created';
   }
 }
 
 /**
- * Concurrency-limited Promise.all helper. Runs `fn` on each `item`, but at most `concurrency` at a time.
+ * Concurrency-limited batch processor.
  */
 async function pLimit<T, R>(
   items: T[],
@@ -211,45 +158,30 @@ async function pLimit<T, R>(
 }
 
 /**
- * Main import entry point.
- * - For new emails: createContact + tag
- * - For existing emails: just apply the tag (preserves all other Mautic data)
+ * Process a batch of rows. Designed to fit well within Vercel Hobby's 10s timeout.
+ * Recommended batch size: 15-20 rows.
+ * Each row makes 1-2 Mautic API calls; concurrency 5 keeps total ~5-8s.
  */
-export async function importRows(rows: LeadBitesRow[]): Promise<ImportSummary> {
-  const start = Date.now();
+export async function processBatch(rows: LeadBitesRow[]): Promise<BatchResult> {
+  const results = await pLimit(rows, 5, processRow);
+
+  let created = 0;
+  let updated = 0;
   const failures: Array<{ email: string; error: string }> = [];
 
-  // Step 1: build email→id map of existing Mautic contacts
-  const existing = await fetchExistingEmailMap();
-
-  // Step 2: split rows into create vs update lists
-  const toCreate: LeadBitesRow[] = [];
-  const toUpdate: Array<{ row: LeadBitesRow; id: number }> = [];
-  for (const row of rows) {
-    const id = existing.get(row.email);
-    if (id) toUpdate.push({ row, id });
-    else toCreate.push(row);
-  }
-
-  // Step 3: create new contacts (concurrency 5)
-  const createResults = await pLimit(toCreate, 5, createContact);
-  const created = createResults.filter((r) => r.ok).length;
-  for (const r of createResults) {
-    if (!r.ok) failures.push({ email: r.item.email, error: r.error });
-  }
-
-  // Step 4: tag existing contacts (concurrency 5)
-  const updateResults = await pLimit(toUpdate, 5, async ({ id }) => applyLeadBitesTag(id));
-  const updated = updateResults.filter((r) => r.ok).length;
-  for (const r of updateResults) {
-    if (!r.ok) failures.push({ email: r.item.row.email, error: r.error });
+  for (const r of results) {
+    if (r.ok) {
+      if (r.value === 'created') created++;
+      else updated++;
+    } else {
+      failures.push({ email: r.item.email, error: r.error });
+    }
   }
 
   return {
     created,
     updated,
     failed: failures.length,
-    failures: failures.slice(0, 50), // Limit response size
-    durationMs: Date.now() - start,
+    failures,
   };
 }
