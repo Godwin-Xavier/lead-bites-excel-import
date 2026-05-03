@@ -40,9 +40,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(200).json({ ok: true, created: 0, updated: 0, failed: 0, failures: [] });
   }
 
-  if (rows.length > 30) {
+  if (rows.length > 10) {
     return res.status(400).json({
-      error: `Batch too large (${rows.length}). Max 30 rows per batch.`,
+      error: `Batch too large (${rows.length}). Max 10 rows per batch.`,
     });
   }
 

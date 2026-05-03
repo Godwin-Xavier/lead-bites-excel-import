@@ -29,7 +29,7 @@ export async function getServerSideProps(ctx: GetServerSidePropsContext): Promis
   return { props: { loggedIn: !!session.loggedIn } };
 }
 
-const BATCH_SIZE = 15;
+const BATCH_SIZE = 5; // small batches keep us well under Vercel Hobby 10s timeout even when Mautic is slow
 const HISTORY_KEY = 'lead-bites-history-v1';
 const MAX_HISTORY = 10;
 
@@ -325,25 +325,49 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
       };
       setRun(running);
 
-      // Process batches
+      // Process batches with retry-on-504 (Mautic can be slow if marketing-emails is busy)
       for (let i = 0; i < batchesTotal; i++) {
         if (cancelRef.current) break;
 
         const batch = parsed.rows.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
-        const res = await fetch('/api/upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rows: batch }),
-        });
 
+        let attempt = 0;
+        let res: Response | null = null;
         let data: any = null;
-        try {
-          data = await res.json();
-        } catch {
-          data = { error: `Batch ${i + 1}: HTTP ${res.status} returned non-JSON` };
+        const MAX_ATTEMPTS = 3;
+        while (attempt < MAX_ATTEMPTS) {
+          attempt++;
+          if (cancelRef.current) break;
+          try {
+            res = await fetch('/api/upload', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ rows: batch }),
+            });
+            try {
+              data = await res.json();
+            } catch {
+              data = { error: `HTTP ${res.status} (non-JSON, likely upstream timeout)` };
+            }
+            if (res.ok && data?.ok) break;
+            // Retry on 504 (gateway timeout) and 502 (bad gateway)
+            if ((res.status === 504 || res.status === 502) && attempt < MAX_ATTEMPTS) {
+              // Wait 5s, 15s before next try
+              await new Promise((r) => setTimeout(r, attempt * 5000));
+              continue;
+            }
+            break;
+          } catch (e: any) {
+            data = { error: e?.message || 'Network error' };
+            if (attempt < MAX_ATTEMPTS) {
+              await new Promise((r) => setTimeout(r, attempt * 5000));
+              continue;
+            }
+            break;
+          }
         }
 
-        if (!res.ok || !data.ok) {
+        if (!res || !res.ok || !data?.ok) {
           running = {
             ...running,
             failed: running.failed + batch.length,
@@ -351,7 +375,7 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
               ...running.failures,
               ...batch.slice(0, 3).map((r) => ({
                 email: r.email,
-                error: data.error || `Batch ${i + 1} failed (HTTP ${res.status})`,
+                error: data?.error || `Batch ${i + 1} failed (HTTP ${res?.status ?? 0})`,
               })),
             ],
             batchesDone: i + 1,
