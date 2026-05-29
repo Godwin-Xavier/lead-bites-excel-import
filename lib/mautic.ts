@@ -3,7 +3,12 @@ import type { LeadBitesRow } from './csv';
 const BASE_URL = (process.env.MAUTIC_BASE_URL || '').replace(/\/$/, '');
 const USERNAME = process.env.MAUTIC_USERNAME || '';
 const PASSWORD = process.env.MAUTIC_PASSWORD || '';
-const LEAD_TAG = process.env.LEAD_TAG || 'lead bites';
+// IMPORTANT: must match `TAG_LEAD_BITES` in the marketing-emails service
+// (`src/orchestrator.py`, line ~577) so the scheduler actually picks up imported
+// contacts. The orchestrator searches with `tag:lead-bites` (hyphen). A previous
+// version of this app used 'lead bites' (space) which silently broke the cold
+// sequence — the SQL cleanup happened on 2026-05-29.
+const LEAD_TAG = process.env.LEAD_TAG || 'lead-bites';
 
 if (!BASE_URL || !USERNAME || !PASSWORD) {
   console.warn('Mautic env vars are not fully configured');

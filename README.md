@@ -63,7 +63,7 @@ Once the first deploy completes, go to **Settings → Environment Variables** an
 | `MAUTIC_PASSWORD` | `Sheilds@#2407` |
 | `UPLOAD_PASSWORD` | (your chosen app password — e.g. `Sheilds@2407`) |
 | `SESSION_PASSWORD` | (random 64-char hex — generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`) |
-| `LEAD_TAG` | `lead bites` |
+| `LEAD_TAG` | `lead-bites` (NOT `lead bites` — must match orchestrator's `TAG_LEAD_BITES`. The space-version was a bug fixed 2026-05-29 — see commit log.) |
 
 Apply to **Production**, **Preview**, and **Development**.
 
