@@ -1,7 +1,7 @@
 /**
- * Talks to the vps-monitor HTTP API on the Vultr VPS.
- * Used to pause/resume marketing-emails around the upload so it doesn't
- * starve Mautic of CPU during the import.
+ * Talks to the vps-monitor HTTP API on the Contabo VPS.
+ * Used to pause/resume marketing-emails around the upload so imports
+ * don't contend with active email sends on the VPS.
  *
  * The API is exposed at https://ops.dynamixsolutions.org and authenticated
  * via Bearer token (env: VPS_OPS_API_TOKEN).

@@ -29,7 +29,7 @@ export async function getServerSideProps(ctx: GetServerSidePropsContext): Promis
   return { props: { loggedIn: !!session.loggedIn } };
 }
 
-const BATCH_SIZE = 5; // small batches keep us well under Vercel Hobby 10s timeout even when Mautic is slow
+const BATCH_SIZE = 5; // small batches keep us well under Vercel Hobby 10s timeout
 const HISTORY_KEY = 'lead-bites-history-v1';
 const MAX_HISTORY = 10;
 
@@ -304,7 +304,7 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
 
       const batchesTotal = Math.ceil(parsed.rows.length / BATCH_SIZE);
 
-      // Test Mautic connection first
+      // Test listmonk connection first
       const testRes = await fetch('/api/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -312,10 +312,10 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
       });
       if (!testRes.ok) {
         const data = await testRes.json().catch(() => ({}));
-        throw new Error(data.error || 'Mautic connection test failed');
+        throw new Error(data.error || 'listmonk connection test failed');
       }
 
-      // Pause marketing-emails on the VPS (frees Mautic CPU during import).
+      // Pause marketing-emails on the VPS during import (avoids send/write contention).
       // Best-effort: failures don't abort the upload.
       try {
         await fetch('/api/upload', {
@@ -406,8 +406,7 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
       }
 
       // Resume marketing-emails on the VPS (whether finished, cancelled, or errored).
-      // Best-effort: failures don't matter, marketing-emails will eventually be
-      // resumed manually if this fails.
+      // Best-effort: marketing-emails auto-resumes after 4h via vps-monitor if this fails.
       try {
         await fetch('/api/upload', {
           method: 'POST',
@@ -465,7 +464,7 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
               </div>
               <div>
                 <h1 className="text-xl font-bold text-slate-900">Lead Bites Uploader</h1>
-                <p className="text-xs text-slate-500">Mautic contact import</p>
+                <p className="text-xs text-slate-500">listmonk contact import</p>
               </div>
             </div>
             <form onSubmit={handleLogin} className="space-y-4">
@@ -534,7 +533,7 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
             </div>
             <div>
               <h1 className="text-base font-bold text-slate-900 leading-tight">Lead Bites Uploader</h1>
-              <p className="text-xs text-slate-500">mautic.dynamixsolutions.org</p>
+              <p className="text-xs text-slate-500">listmonk · contabo</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -661,7 +660,7 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
                   ) : (
                     <>
                       <Upload className="w-4 h-4" />
-                      Import to Mautic
+                      Import to listmonk
                     </>
                   )}
                 </button>
@@ -741,8 +740,8 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
                   <div className="mt-4 flex items-start gap-2 text-sm text-emerald-800 bg-emerald-50 px-3 py-2.5 rounded-lg border border-emerald-200">
                     <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" />
                     <div>
-                      The Vultr <code className="bg-emerald-100 px-1 rounded text-xs">marketing-emails</code>{' '}
-                      service will pick up these contacts within 5 minutes and start the 5-stage cold-outreach sequence.
+                      The Contabo <code className="bg-emerald-100 px-1 rounded text-xs">marketing-emails</code>{' '}
+                      service picks up new contacts within 30 minutes and starts the 5-stage cold-outreach sequence.
                     </div>
                   </div>
                 )}
@@ -824,10 +823,10 @@ export default function Home({ loggedIn: initialLoggedIn }: LoginProps) {
               <h3 className="text-sm font-semibold text-slate-900 mb-2">How it works</h3>
               <ol className="text-xs text-slate-700 space-y-1.5 list-decimal list-inside">
                 <li>CSV parsed & deduped in browser</li>
-                <li>Sent to Mautic in batches of {BATCH_SIZE} rows</li>
-                <li>New emails → contact created with <code className="bg-white px-1 rounded">lead bites</code> tag</li>
+                <li>Sent to listmonk in batches of {BATCH_SIZE} rows</li>
+                <li>New emails → contact created with <code className="bg-white px-1 rounded">lead-bites</code> tag</li>
                 <li>Existing emails → tag added (other tags preserved)</li>
-                <li>Vultr scheduler starts emails within 5 min</li>
+                <li>Contabo scheduler starts emails within 30 min</li>
               </ol>
             </div>
           </div>

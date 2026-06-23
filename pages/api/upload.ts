@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getSession } from '@/lib/auth';
-import { processBatch, testConnection } from '@/lib/mautic';
+import { processBatch, testConnection } from '@/lib/listmonk';
 import type { LeadBitesRow } from '@/lib/csv';
 import { pauseMarketingEmails, resumeMarketingEmails } from '@/lib/vps_control';
 
@@ -44,7 +44,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // Optional test-connection ping (used by client before starting batches)
   if (testOnly) {
     const t = await testConnection();
-    if (!t.ok) return res.status(502).json({ error: `Mautic unreachable: ${t.message}` });
+    if (!t.ok) return res.status(502).json({ error: `listmonk unreachable: ${t.message}` });
     return res.status(200).json({ ok: true });
   }
 
